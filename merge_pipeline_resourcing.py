@@ -157,11 +157,6 @@ def stage_recent_salesforce_exports(
     resourcing_destination = data_dir / RESOURCING_FILE
 
     recent_csvs = _find_recent_csv_files(downloads_dir, recent_seconds)
-    if not recent_csvs:
-        raise ValueError(
-            f"No CSV files found in {downloads_dir} modified within the last "
-            f"{recent_seconds // 60} minutes"
-        )
 
     pipeline_candidates: list[Path] = []
     resourcing_candidates: list[Path] = []
@@ -185,14 +180,20 @@ def stage_recent_salesforce_exports(
         elif is_resourcing:
             resourcing_candidates.append(csv_path)
 
+    missing: list[str] = []
     if not pipeline_candidates:
-        raise ValueError(
-            "Could not find recent Pipeline CSV (header must include 'Opportunity Owner')"
-        )
+        missing.append("Pipeline CSV (requires column 'Opportunity Owner')")
     if not resourcing_candidates:
-        raise ValueError(
-            "Could not find recent Resourcing CSV (header must include 'Resource Role')"
-        )
+        missing.append("Resourcing CSV (requires column 'Resource Role')")
+    if missing:
+        if not recent_csvs:
+            raise ValueError(
+                "Missing recent Salesforce export(s): "
+                + ", ".join(missing)
+                + f". No CSV files were modified in {downloads_dir} within the last "
+                f"{recent_seconds // 60} minutes."
+            )
+        raise ValueError("Missing recent Salesforce export(s): " + ", ".join(missing))
 
     selected_pipeline = pipeline_candidates[0]
     selected_resourcing = resourcing_candidates[0]
@@ -213,6 +214,22 @@ def stage_recent_salesforce_exports(
 
     print("Staging complete: data/pipeline.csv and data/resourcing.csv")
     return pipeline_destination, resourcing_destination
+
+
+def ingest_files(
+    base_dir: Path | None = None, recent_seconds: int = RECENT_WINDOW_SECONDS
+) -> tuple[Path, Path]:
+    if base_dir is None:
+        base_dir = Path(__file__).resolve().parent
+    downloads_dir = resolve_downloads_dir(base_dir)
+    if downloads_dir is None:
+        raise ValueError("Downloads directory not found in known locations")
+    data_dir = base_dir / DATA_DIR
+    return stage_recent_salesforce_exports(
+        downloads_dir=downloads_dir,
+        data_dir=data_dir,
+        recent_seconds=recent_seconds,
+    )
 
 
 def parse_args() -> argparse.Namespace:

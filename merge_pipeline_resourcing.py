@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
 """Merge, filter, and explode resourcing assignments into long monthly rows."""
 
+import argparse
+import csv
 from datetime import date
 from pathlib import Path
 import re
+import shutil
 import sys
+import time
 
 import pandas as pd
 
 
+DATA_DIR = "data"
 PIPELINE_FILE = "pipeline.csv"
 RESOURCING_FILE = "resourcing.csv"
 FORECAST_OUTPUT_FILE = "looker_studio_pipeline_forecast_v3.csv"
+RECENT_WINDOW_SECONDS = 10 * 60
 
 PIPELINE_COLUMN_MAP = {
     "Opportunity Name": "Opportunity Name",
@@ -107,6 +113,136 @@ def read_csv_with_fallback(path: Path) -> pd.DataFrame:
     raise ValueError(
         f"Could not decode CSV file '{path.name}' with supported encodings: {encodings}"
     ) from last_error
+
+
+def _read_csv_header_columns(path: Path) -> set[str]:
+    encodings = ["ISO-8859-1", "cp1252"]
+    last_error: Exception | None = None
+    for encoding in encodings:
+        try:
+            with path.open("r", encoding=encoding, newline="") as file_handle:
+                reader = csv.reader(file_handle)
+                header = next(reader, [])
+            return {column.strip() for column in header}
+        except Exception as exc:
+            last_error = exc
+    raise ValueError(f"Could not read header from CSV file: {path}") from last_error
+
+
+def _find_recent_csv_files(downloads_dir: Path, seconds: int) -> list[Path]:
+    now = time.time()
+    recent_files = []
+    for file_path in downloads_dir.iterdir():
+        if not file_path.is_file() or file_path.suffix.lower() != ".csv":
+            continue
+        file_age_seconds = now - file_path.stat().st_mtime
+        if file_age_seconds <= seconds:
+            recent_files.append(file_path)
+    return sorted(recent_files, key=lambda path: path.stat().st_mtime, reverse=True)
+
+
+def _atomic_move(source: Path, destination: Path) -> None:
+    temp_destination = destination.with_name(destination.name + ".tmp")
+    if temp_destination.exists():
+        temp_destination.unlink()
+    shutil.move(str(source), str(temp_destination))
+    temp_destination.replace(destination)
+
+
+def stage_recent_salesforce_exports(
+    downloads_dir: Path, data_dir: Path, recent_seconds: int = RECENT_WINDOW_SECONDS
+) -> tuple[Path, Path]:
+    data_dir.mkdir(parents=True, exist_ok=True)
+    pipeline_destination = data_dir / PIPELINE_FILE
+    resourcing_destination = data_dir / RESOURCING_FILE
+
+    recent_csvs = _find_recent_csv_files(downloads_dir, recent_seconds)
+    if not recent_csvs:
+        raise ValueError(
+            f"No CSV files found in {downloads_dir} modified within the last "
+            f"{recent_seconds // 60} minutes"
+        )
+
+    pipeline_candidates: list[Path] = []
+    resourcing_candidates: list[Path] = []
+
+    for csv_path in recent_csvs:
+        try:
+            columns = _read_csv_header_columns(csv_path)
+        except ValueError:
+            continue
+
+        is_pipeline = "Opportunity Owner" in columns
+        is_resourcing = "Resource Role" in columns
+
+        if is_pipeline and is_resourcing:
+            raise ValueError(
+                f"Ambiguous Salesforce export (matches both Pipeline and Resourcing): "
+                f"{csv_path.name}"
+            )
+        if is_pipeline:
+            pipeline_candidates.append(csv_path)
+        elif is_resourcing:
+            resourcing_candidates.append(csv_path)
+
+    if not pipeline_candidates:
+        raise ValueError(
+            "Could not find recent Pipeline CSV (header must include 'Opportunity Owner')"
+        )
+    if not resourcing_candidates:
+        raise ValueError(
+            "Could not find recent Resourcing CSV (header must include 'Resource Role')"
+        )
+
+    selected_pipeline = pipeline_candidates[0]
+    selected_resourcing = resourcing_candidates[0]
+
+    print(
+        f"Found Pipeline file: {selected_pipeline.name} -> Moving to data/pipeline.csv"
+    )
+    print(
+        "Found Resourcing file: "
+        f"{selected_resourcing.name} -> Moving to data/resourcing.csv"
+    )
+
+    _atomic_move(selected_pipeline, pipeline_destination)
+    _atomic_move(selected_resourcing, resourcing_destination)
+
+    if not pipeline_destination.exists() or not resourcing_destination.exists():
+        raise ValueError("Staging failed: destination files were not created in data/")
+
+    print("Staging complete: data/pipeline.csv and data/resourcing.csv")
+    return pipeline_destination, resourcing_destination
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--stage",
+        action="store_true",
+        help="Detect recent Salesforce exports in Downloads and stage them into data/ "
+        "before processing.",
+    )
+    parser.add_argument(
+        "--stage-only",
+        action="store_true",
+        help="Run staging only, then exit.",
+    )
+    return parser.parse_args()
+
+
+def resolve_downloads_dir(base_dir: Path) -> Path | None:
+    candidates = [Path.home() / "Downloads"]
+
+    parts = base_dir.resolve().parts
+    if len(parts) >= 5 and parts[1:4] == ("mnt", "c", "Users"):
+        windows_user = parts[4]
+        candidates.append(Path("/mnt/c/Users") / windows_user / "Downloads")
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def _parse_required_date(value: object, field_name: str) -> date:
@@ -205,20 +341,31 @@ def explode_to_monthly_rows(row: dict | pd.Series) -> list[dict]:
     return rows
 
 
-def main() -> int:
+def main(stage_files: bool = False, stage_only: bool = False) -> int:
     base_dir = Path(__file__).resolve().parent
-    pipeline_path = base_dir / PIPELINE_FILE
-    resourcing_path = base_dir / RESOURCING_FILE
+    data_dir = base_dir / DATA_DIR
+    downloads_dir = resolve_downloads_dir(base_dir)
+    pipeline_path = data_dir / PIPELINE_FILE
+    resourcing_path = data_dir / RESOURCING_FILE
     forecast_output_path = base_dir / FORECAST_OUTPUT_FILE
 
-    if not pipeline_path.exists():
-        print(f"Error: file not found: {pipeline_path}", file=sys.stderr)
-        return 1
-    if not resourcing_path.exists():
-        print(f"Error: file not found: {resourcing_path}", file=sys.stderr)
-        return 1
-
     try:
+        if stage_files or stage_only:
+            if downloads_dir is None:
+                raise ValueError("Downloads directory not found in known locations")
+            stage_recent_salesforce_exports(downloads_dir, data_dir)
+            if stage_only:
+                return 0
+
+        if not pipeline_path.exists():
+            raise ValueError(
+                f"file not found: {pipeline_path} (run with --stage to auto-stage from Downloads)"
+            )
+        if not resourcing_path.exists():
+            raise ValueError(
+                f"file not found: {resourcing_path} (run with --stage to auto-stage from Downloads)"
+            )
+
         pipeline_df = read_csv_with_fallback(pipeline_path)
         resourcing_df = read_csv_with_fallback(resourcing_path)
 
@@ -362,4 +509,5 @@ if __name__ == "__main__":
         raise ValueError("Expected Market to be preserved as 'UK - Market' in all rows")
     print("Split test passed: 3 monthly rows with 1000.0 revenue each.")
 
-    raise SystemExit(main())
+    cli_args = parse_args()
+    raise SystemExit(main(stage_files=cli_args.stage, stage_only=cli_args.stage_only))

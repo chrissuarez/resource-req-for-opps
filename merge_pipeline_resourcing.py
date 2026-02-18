@@ -93,6 +93,7 @@ LONG_FORMAT_OUTPUT_FIELDS = [
     "Capability",
     "Role (short)",
     "Reporting Month",
+    "Reporting Month (Date)",
     "Monthly Allocated Revenue",
     "Monthly Allocated Hours",
 ]
@@ -378,6 +379,11 @@ def explode_to_monthly_rows(row: dict | pd.Series) -> list[dict]:
             allocated_revenue = round(total_revenue / month_count, 2)
             running_hours += allocated_hours
             running_revenue += allocated_revenue
+        reporting_month = month_start.strftime("%Y-%m-%d")
+        if not reporting_month or reporting_month.lower() == "nat":
+            raise ValueError(
+                f"Invalid Reporting Month generated for Opportunity '{opportunity_name}'"
+            )
 
         rows.append(
             {
@@ -387,7 +393,8 @@ def explode_to_monthly_rows(row: dict | pd.Series) -> list[dict]:
                 "Capability": capability,
                 "Role (short)": role_short,
                 PRICING_REGION_COLUMN: pricing_region,
-                "Reporting Month": month_start.strftime("%Y-%m-01"),
+                "Reporting Month": reporting_month,
+                "Reporting Month (Date)": reporting_month,
                 "Monthly Allocated Revenue": allocated_revenue,
                 "Monthly Allocated Hours": allocated_hours,
             }
@@ -543,6 +550,13 @@ def main(stage_files: bool = False, stage_only: bool = False) -> int:
         )
         if monthly_df["Reporting Month"].isna().any():
             raise ValueError("Invalid Reporting Month values detected in monthly data")
+        monthly_df["Reporting Month (Date)"] = pd.to_datetime(
+            monthly_df["Reporting Month (Date)"], format="%Y-%m-%d", errors="coerce"
+        )
+        if monthly_df["Reporting Month (Date)"].isna().any():
+            raise ValueError(
+                "Invalid Reporting Month (Date) values detected in monthly data"
+            )
         monthly_df = monthly_df.sort_values(
             ["Opportunity Name", "Resource Role", "Reporting Month"]
         )
@@ -561,6 +575,23 @@ def main(stage_files: bool = False, stage_only: bool = False) -> int:
         print(monthly_df.head(20).to_string(index=False))
         monthly_df["Reporting Month"] = monthly_df["Reporting Month"].dt.strftime(
             "%Y-%m-%d"
+        )
+        monthly_df["Reporting Month (Date)"] = monthly_df[
+            "Reporting Month (Date)"
+        ].dt.strftime("%Y-%m-%d")
+        for month_column in ["Reporting Month", "Reporting Month (Date)"]:
+            month_values = monthly_df[month_column].astype(str).str.strip()
+            if month_values.eq("").any():
+                raise ValueError(f"Blank values detected in {month_column}")
+            if month_values.str.lower().eq("nat").any():
+                raise ValueError(f"'NaT' values detected in {month_column}")
+        print(
+            "Reporting Month sample (first 5): "
+            f"{monthly_df['Reporting Month'].head(5).tolist()}"
+        )
+        print(
+            "Reporting Month (Date) sample (first 5): "
+            f"{monthly_df['Reporting Month (Date)'].head(5).tolist()}"
         )
         monthly_df = monthly_df[LONG_FORMAT_OUTPUT_FIELDS]
         monthly_df.to_csv(forecast_output_path, index=False, encoding="utf-8-sig")

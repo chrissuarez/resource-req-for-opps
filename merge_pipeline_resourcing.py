@@ -291,16 +291,22 @@ def _parse_required_float(value: object, field_name: str) -> float:
         raise ValueError(f"Invalid numeric value for {field_name}: {value}") from exc
 
 
-def extract_capability(role_str: object) -> str:
+def _split_role_parts(role_str: object) -> tuple[str, str]:
     role_text = str(role_str).strip()
-    capability = role_text.split(" - ", 1)[0]
-    return capability.strip()
+    if " - " not in role_text:
+        return role_text, role_text
+    capability, role_short = role_text.rsplit(" - ", 1)
+    return capability.strip(), role_short.strip()
+
+
+def extract_capability(role_str: object) -> str:
+    capability, _ = _split_role_parts(role_str)
+    return capability
 
 
 def extract_short_role(role_str: object) -> str:
-    role_text = str(role_str).strip()
-    short_role = role_text.rsplit(" - ", 1)[-1]
-    return short_role.strip()
+    _, role_short = _split_role_parts(role_str)
+    return role_short
 
 
 def _month_start(d: date) -> date:
@@ -461,6 +467,17 @@ def main(stage_files: bool = False, stage_only: bool = False) -> int:
         )
         merged_df["Capability"] = merged_df["Resource Role"].apply(extract_capability)
         merged_df["Role (short)"] = merged_df["Resource Role"].apply(extract_short_role)
+        parsing_test_cases = [
+            "CX - Experience Design - Director",
+            "Analytics - Senior Manager",
+            "JustAJobTitle",
+        ]
+        print("Right-split role parsing verification cases:")
+        for case in parsing_test_cases:
+            print(
+                f"{case!r} -> Capability: '{extract_capability(case)}', "
+                f"Role (short): '{extract_short_role(case)}'"
+            )
         merged_unique_count = merged_df["Opportunity Name"].nunique(dropna=True)
 
         print(f"Pipeline unique Opportunity Names: {pipeline_unique_count}")
@@ -573,6 +590,10 @@ if __name__ == "__main__":
     if extract_short_role("CX - CRM - Senior Manager") != "Senior Manager":
         raise ValueError(
             "Expected Role (short) to preserve only the final segment after hyphen splits"
+        )
+    if extract_capability("CX - Experience Design - Director") != "CX - Experience Design":
+        raise ValueError(
+            "Expected Capability to preserve all segments before the final hyphen split"
         )
     print("Split test passed: 3 monthly rows with 1000.0 revenue each.")
 

@@ -18,6 +18,7 @@ PIPELINE_FILE = "pipeline.csv"
 RESOURCING_FILE = "resourcing.csv"
 FORECAST_OUTPUT_FILE = "looker_studio_pipeline_forecast_v3.csv"
 RECENT_WINDOW_SECONDS = 10 * 60
+PRICING_REGION_COLUMN = "Pricing Region: Region Name"
 
 PIPELINE_COLUMN_MAP = {
     "Opportunity Name": "Opportunity Name",
@@ -86,6 +87,7 @@ LONG_FORMAT_OUTPUT_FIELDS = [
     "Lead Source",
     "Type",
     "Market",
+    PRICING_REGION_COLUMN,
     "Opportunity Name",
     "Resource Role",
     "Capability",
@@ -337,6 +339,11 @@ def explode_to_monthly_rows(row: dict | pd.Series) -> list[dict]:
         role_short = str(row["Role (short)"]).strip()
     else:
         role_short = extract_short_role(resource_role)
+    pricing_region = row.get(PRICING_REGION_COLUMN, "")
+    if pd.isna(pricing_region):
+        pricing_region = ""
+    else:
+        pricing_region = str(pricing_region).strip()
     metadata_values = {column: row[column] for column in METADATA_COLUMNS}
     start_date = _parse_required_date(row["Start Date"], "Start Date")
     end_date = _parse_required_date(row["End Date"], "End Date")
@@ -379,6 +386,7 @@ def explode_to_monthly_rows(row: dict | pd.Series) -> list[dict]:
                 "Resource Role": resource_role,
                 "Capability": capability,
                 "Role (short)": role_short,
+                PRICING_REGION_COLUMN: pricing_region,
                 "Reporting Month": month_start.strftime("%Y-%m-01"),
                 "Monthly Allocated Revenue": allocated_revenue,
                 "Monthly Allocated Hours": allocated_hours,
@@ -465,6 +473,22 @@ def main(stage_files: bool = False, stage_only: bool = False) -> int:
             on="Opportunity Name",
             how="inner",
         )
+        if PRICING_REGION_COLUMN in merged_df.columns:
+            pricing_region_values = sorted(
+                value
+                for value in merged_df[PRICING_REGION_COLUMN]
+                .dropna()
+                .astype(str)
+                .str.strip()
+                .unique()
+                if value
+            )
+            print(f"Unique Pricing Region values (first 5): {pricing_region_values[:5]}")
+        else:
+            print(
+                "Warning: merged_df missing column "
+                f"'{PRICING_REGION_COLUMN}'. Export will use empty strings."
+            )
         merged_df["Capability"] = merged_df["Resource Role"].apply(extract_capability)
         merged_df["Role (short)"] = merged_df["Resource Role"].apply(extract_short_role)
         parsing_test_cases = [

@@ -89,6 +89,7 @@ LONG_FORMAT_OUTPUT_FIELDS = [
     "Opportunity Name",
     "Resource Role",
     "Capability",
+    "Role (short)",
     "Reporting Month",
     "Monthly Allocated Revenue",
     "Monthly Allocated Hours",
@@ -296,6 +297,12 @@ def extract_capability(role_str: object) -> str:
     return capability.strip()
 
 
+def extract_short_role(role_str: object) -> str:
+    role_text = str(role_str).strip()
+    short_role = role_text.rsplit(" - ", 1)[-1]
+    return short_role.strip()
+
+
 def _month_start(d: date) -> date:
     return date(d.year, d.month, 1)
 
@@ -320,6 +327,10 @@ def explode_to_monthly_rows(row: dict | pd.Series) -> list[dict]:
         capability = str(row["Capability"]).strip()
     else:
         capability = extract_capability(resource_role)
+    if "Role (short)" in row and not pd.isna(row["Role (short)"]):
+        role_short = str(row["Role (short)"]).strip()
+    else:
+        role_short = extract_short_role(resource_role)
     metadata_values = {column: row[column] for column in METADATA_COLUMNS}
     start_date = _parse_required_date(row["Start Date"], "Start Date")
     end_date = _parse_required_date(row["End Date"], "End Date")
@@ -361,6 +372,7 @@ def explode_to_monthly_rows(row: dict | pd.Series) -> list[dict]:
                 "Opportunity Name": opportunity_name,
                 "Resource Role": resource_role,
                 "Capability": capability,
+                "Role (short)": role_short,
                 "Reporting Month": month_start.strftime("%Y-%m-01"),
                 "Monthly Allocated Revenue": allocated_revenue,
                 "Monthly Allocated Hours": allocated_hours,
@@ -448,6 +460,7 @@ def main(stage_files: bool = False, stage_only: bool = False) -> int:
             how="inner",
         )
         merged_df["Capability"] = merged_df["Resource Role"].apply(extract_capability)
+        merged_df["Role (short)"] = merged_df["Resource Role"].apply(extract_short_role)
         merged_unique_count = merged_df["Opportunity Name"].nunique(dropna=True)
 
         print(f"Pipeline unique Opportunity Names: {pipeline_unique_count}")
@@ -498,6 +511,12 @@ def main(stage_files: bool = False, stage_only: bool = False) -> int:
             if value
         )
         print(f"Unique Capabilities found: {capability_values[:5]}")
+        role_short_values = sorted(
+            value
+            for value in merged_df["Role (short)"].dropna().astype(str).str.strip().unique()
+            if value
+        )
+        print(f"Unique Role (short) found: {role_short_values[:5]}")
         print(monthly_df.head(20).to_string(index=False))
         monthly_df["Reporting Month"] = monthly_df["Reporting Month"].dt.strftime(
             "%Y-%m-%d"
@@ -551,6 +570,10 @@ if __name__ == "__main__":
         raise ValueError("Expected Market to be preserved as 'UK - Market' in all rows")
     if extract_capability("Designer") != "Designer":
         raise ValueError("Expected Capability to preserve role when no delimiter exists")
+    if extract_short_role("CX - CRM - Senior Manager") != "Senior Manager":
+        raise ValueError(
+            "Expected Role (short) to preserve only the final segment after hyphen splits"
+        )
     print("Split test passed: 3 monthly rows with 1000.0 revenue each.")
 
     cli_args = parse_args()

@@ -88,6 +88,7 @@ LONG_FORMAT_OUTPUT_FIELDS = [
     "Market",
     "Opportunity Name",
     "Resource Role",
+    "Capability",
     "Reporting Month",
     "Monthly Allocated Revenue",
     "Monthly Allocated Hours",
@@ -289,6 +290,12 @@ def _parse_required_float(value: object, field_name: str) -> float:
         raise ValueError(f"Invalid numeric value for {field_name}: {value}") from exc
 
 
+def extract_capability(role_str: object) -> str:
+    role_text = str(role_str).strip()
+    capability = role_text.split(" - ", 1)[0]
+    return capability.strip()
+
+
 def _month_start(d: date) -> date:
     return date(d.year, d.month, 1)
 
@@ -309,6 +316,10 @@ def explode_to_monthly_rows(row: dict | pd.Series) -> list[dict]:
 
     opportunity_name = str(row["Opportunity Name"])
     resource_role = str(row["Resource Role"])
+    if "Capability" in row and not pd.isna(row["Capability"]):
+        capability = str(row["Capability"]).strip()
+    else:
+        capability = extract_capability(resource_role)
     metadata_values = {column: row[column] for column in METADATA_COLUMNS}
     start_date = _parse_required_date(row["Start Date"], "Start Date")
     end_date = _parse_required_date(row["End Date"], "End Date")
@@ -349,6 +360,7 @@ def explode_to_monthly_rows(row: dict | pd.Series) -> list[dict]:
                 **metadata_values,
                 "Opportunity Name": opportunity_name,
                 "Resource Role": resource_role,
+                "Capability": capability,
                 "Reporting Month": month_start.strftime("%Y-%m-01"),
                 "Monthly Allocated Revenue": allocated_revenue,
                 "Monthly Allocated Hours": allocated_hours,
@@ -435,6 +447,7 @@ def main(stage_files: bool = False, stage_only: bool = False) -> int:
             on="Opportunity Name",
             how="inner",
         )
+        merged_df["Capability"] = merged_df["Resource Role"].apply(extract_capability)
         merged_unique_count = merged_df["Opportunity Name"].nunique(dropna=True)
 
         print(f"Pipeline unique Opportunity Names: {pipeline_unique_count}")
@@ -479,10 +492,17 @@ def main(stage_files: bool = False, stage_only: bool = False) -> int:
         monthly_df = monthly_df.sort_values(
             ["Opportunity Name", "Resource Role", "Reporting Month"]
         )
+        capability_values = sorted(
+            value
+            for value in merged_df["Capability"].dropna().astype(str).str.strip().unique()
+            if value
+        )
+        print(f"Unique Capabilities found: {capability_values[:5]}")
         print(monthly_df.head(20).to_string(index=False))
         monthly_df["Reporting Month"] = monthly_df["Reporting Month"].dt.strftime(
             "%Y-%m-%d"
         )
+        monthly_df = monthly_df[LONG_FORMAT_OUTPUT_FIELDS]
         monthly_df.to_csv(forecast_output_path, index=False, encoding="utf-8-sig")
         print(
             f"Saved long-format monthly forecast (utf-8-sig): {forecast_output_path}"
@@ -505,7 +525,7 @@ if __name__ == "__main__":
         "Type": "New Business",
         "Market": "UK - Market",
         "Opportunity Name": "Test Opportunity",
-        "Resource Role": "Test Role",
+        "Resource Role": "Client Management - Director",
         "Start Date": "2025-01-01",
         "End Date": "2025-03-01",
         "Hours": 300,
@@ -520,10 +540,17 @@ if __name__ == "__main__":
     actual_months = [row["Reporting Month"] for row in split_result]
     if actual_months != expected_months:
         raise ValueError(f"Unexpected reporting months: {actual_months}")
+    if any(row["Capability"] != "Client Management" for row in split_result):
+        raise ValueError(
+            "Expected Capability to be 'Client Management' for role "
+            "'Client Management - Director'"
+        )
     if any(row["Monthly Allocated Revenue"] != 1000.0 for row in split_result):
         raise ValueError("Expected each monthly allocated revenue to equal 1000.0")
     if any(row["Market"] != "UK - Market" for row in split_result):
         raise ValueError("Expected Market to be preserved as 'UK - Market' in all rows")
+    if extract_capability("Designer") != "Designer":
+        raise ValueError("Expected Capability to preserve role when no delimiter exists")
     print("Split test passed: 3 monthly rows with 1000.0 revenue each.")
 
     cli_args = parse_args()

@@ -21,6 +21,22 @@ Download these two reports from Salesforce:
 
 After downloading, run the pipeline within 10 minutes so auto-detection can find the files in `Downloads`.
 
+## UTL Report Preparation
+
+Before running the UTL processing script, prepare and export the UTL source reports:
+
+1. Open the historical utilisation report.
+2. Set date range to previous month.
+3. Select all capabilities, and deselect irrelevant parent capabilities.
+4. Set region to `United Kingdom`.
+5. Export data with utilisation by resources.
+6. Export rolled up time type report.
+7. Run the script:
+
+```bash
+python process_utl_pipeline.py
+```
+
 ## Setup
 
 ## 1) Python dependencies
@@ -44,6 +60,7 @@ Create a `.env` file in the project root:
 ```env
 GOOGLE_SHEET_URL=https://docs.google.com/spreadsheets/d/your_sheet_id_here/edit
 GOOGLE_SHEET_TAB=Latest Data
+GOOGLE_SHEET_UTL_TAB=Utl vs Pipeline
 SERVICE_ACCOUNT_JSON_PATH=C:/Users/your-user/path/to/service_account.json
 ```
 
@@ -81,6 +98,24 @@ Run ingest + processing, skip Google upload:
 python main.py --skip-upload
 ```
 
+Run full workflow and also upload UTL output (`data/utl_pipeline_output.csv`) to the
+tab configured in `GOOGLE_SHEET_UTL_TAB`:
+
+```bash
+python main.py --upload-utl
+```
+
+Upload only UTL output (no ingest, no forecast processing/upload):
+
+```bash
+python main.py --upload-utl --utl-only
+```
+
+Notes for `--upload-utl`:
+- If `data/utl_pipeline_output.csv` is missing, UTL upload is skipped with a warning.
+- If `GOOGLE_SHEET_UTL_TAB` is unset, UTL upload is skipped with a warning.
+- If UTL upload fails after forecast upload succeeds, the run warns and still completes.
+
 ## Google upload only
 
 If you want to upload an already-generated CSV directly:
@@ -113,3 +148,4 @@ python upload_to_google_sheets.py --csv-path looker_studio_pipeline_forecast_v3.
   - Share the Google Sheet with the service account email.
 - `Worksheet tab not found`:
   - Confirm `GOOGLE_SHEET_TAB` matches exactly.
+  - For UTL uploads, also confirm `GOOGLE_SHEET_UTL_TAB` matches exactly.

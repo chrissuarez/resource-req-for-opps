@@ -1,8 +1,34 @@
 # Resourcing Requirements for Pipeline
 
+## Quick Commands
+
+Full forecast workflow (stage from `data/input`, process, upload):
+
+```bash
+python main.py
+```
+
+Full forecast workflow + UTL upload:
+
+```bash
+python main.py --process-utl --upload-utl
+```
+
+UTL-only refresh + upload:
+
+```bash
+python main.py --process-utl --upload-utl --utl-only
+```
+
+Upload-only (already generated UTL output):
+
+```bash
+python main.py --upload-utl --utl-only
+```
+
 This project automates a full workflow:
 
-1. Detect the latest Salesforce exports in `Downloads`
+1. Read Salesforce exports from `data/input`
 2. Stage them into `data/` as:
    - `data/pipeline.csv`
    - `data/resourcing.csv`
@@ -19,7 +45,44 @@ Download these two reports from Salesforce:
 - Resourcing report:  
   `https://jellyfish.lightning.force.com/lightning/r/Report/00ORN000009Sj8H2AS/view`
 
-After downloading, run the pipeline within 10 minutes so auto-detection can find the files in `Downloads`.
+Place exported forecast CSVs in `data/input` before running `python main.py`.
+
+Forecast input rules:
+- Forecast processing reads only from `data/input` (never from `Downloads`).
+- Raw export filenames are allowed.
+- The newest matching file for each schema is selected:
+  - Pipeline source: must include column `Opportunity Owner`
+  - Resourcing source: must include column `Resource Role`
+- Selected files are copied to:
+  - `data/pipeline.csv`
+  - `data/resourcing.csv`
+- Processing fails fast if either required source is missing.
+
+## UTL Report Preparation
+
+Before running UTL processing, prepare and export the UTL source reports:
+
+1. Open the historical utilisation report.
+2. Set date range to previous month.
+3. Select all capabilities, and deselect irrelevant parent capabilities.
+4. Set region to `United Kingdom`.
+5. Export data with utilisation by resources.
+6. Export rolled up time type report.
+7. Put exported CSV files in `data/input`.
+8. Run the script:
+
+```bash
+python process_utl_pipeline.py
+```
+
+UTL input rules:
+- UTL processing reads only from `data/input` (never from `Downloads`).
+- Raw export filenames are allowed; matching files are auto-normalized to:
+  - `data/input/utl_by_capability.csv`
+  - `data/input/time_type.csv`
+- The newest matching file for each schema is selected.
+- Processing fails fast if either required source is missing or has invalid schema.
+- Output is written to `data/output/utl_pipeline_output.csv`.
 
 ## Setup
 
@@ -44,6 +107,7 @@ Create a `.env` file in the project root:
 ```env
 GOOGLE_SHEET_URL=https://docs.google.com/spreadsheets/d/your_sheet_id_here/edit
 GOOGLE_SHEET_TAB=Latest Data
+GOOGLE_SHEET_UTL_TAB=Utl vs Pipeline
 SERVICE_ACCOUNT_JSON_PATH=C:/Users/your-user/path/to/service_account.json
 ```
 
@@ -63,7 +127,7 @@ python main.py
 
 This will:
 
-1. Stage recent CSVs from `Downloads`
+1. Stage CSVs from `data/input`
 2. Process forecast data
 3. Upload results to Google Sheets
 
@@ -80,6 +144,28 @@ Run ingest + processing, skip Google upload:
 ```bash
 python main.py --skip-upload
 ```
+
+Run full workflow and also upload UTL output (`data/output/utl_pipeline_output.csv`) to the
+tab configured in `GOOGLE_SHEET_UTL_TAB`:
+
+```bash
+python main.py --process-utl --upload-utl
+```
+
+Process UTL from `data/input` and upload only UTL output (no forecast ingest/process/upload):
+
+```bash
+python main.py --process-utl --upload-utl --utl-only
+```
+
+Notes for `--upload-utl`:
+- If `data/output/utl_pipeline_output.csv` is missing, UTL upload is skipped with a warning.
+- If `GOOGLE_SHEET_UTL_TAB` is unset, UTL upload is skipped with a warning.
+- If UTL upload fails after forecast upload succeeds, the run warns and still completes.
+
+Notes for `--process-utl`:
+- Runs UTL normalization + processing from `data/input`.
+- Can be combined with `--upload-utl` in both normal and `--utl-only` modes.
 
 ## Google upload only
 
@@ -105,11 +191,14 @@ python upload_to_google_sheets.py --csv-path looker_studio_pipeline_forecast_v3.
 
 ## Troubleshooting
 
-- `Missing recent Salesforce export(s)`:
-  - Re-download both reports and rerun within 10 minutes.
+- `Missing Salesforce input file(s)`:
+  - Ensure both forecast exports are in `data/input` and include required columns:
+    - Pipeline: `Opportunity Owner`
+    - Resourcing: `Resource Role`
 - `Missing Google Sheet URL`:
   - Confirm `.env` exists and contains `GOOGLE_SHEET_URL`.
 - `403 The caller does not have permission`:
   - Share the Google Sheet with the service account email.
 - `Worksheet tab not found`:
   - Confirm `GOOGLE_SHEET_TAB` matches exactly.
+  - For UTL uploads, also confirm `GOOGLE_SHEET_UTL_TAB` matches exactly.

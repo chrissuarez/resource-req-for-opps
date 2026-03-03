@@ -4,18 +4,20 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 from types import SimpleNamespace
 import sys
 
 import merge_pipeline_resourcing as pipeline_processing
+import process_utl_pipeline as utl_processing
 import upload_to_google_sheets as sheets_upload
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Run the full pipeline: stage recent Salesforce exports, process forecast, "
+            "Run the full pipeline: stage Salesforce exports from data/input, process forecast, "
             "and upload to Google Sheets."
         )
     )
@@ -28,6 +30,31 @@ def parse_args() -> argparse.Namespace:
         "--skip-upload",
         action="store_true",
         help="Run ingest_files() + process_data(), but skip Google Sheets upload.",
+    )
+    parser.add_argument(
+        "--upload-utl",
+        action="store_true",
+        help=(
+            "After forecast upload, also upload data/output/utl_pipeline_output.csv to "
+            "the tab "
+            "from GOOGLE_SHEET_UTL_TAB."
+        ),
+    )
+    parser.add_argument(
+        "--process-utl",
+        action="store_true",
+        help=(
+            "Run UTL processing from data/input to generate "
+            "data/output/utl_pipeline_output.csv."
+        ),
+    )
+    parser.add_argument(
+        "--utl-only",
+        action="store_true",
+        help=(
+            "UTL mode only: skip ingesting or processing forecast data. "
+            "Use with --process-utl and/or --upload-utl as needed."
+        ),
     )
     return parser.parse_args()
 
@@ -67,10 +94,70 @@ def upload_to_sheets(output_csv: Path) -> tuple[str, int]:
     return sheet_name, row_count
 
 
+def upload_utl_to_sheets(base_dir: Path) -> tuple[str, int] | None:
+    print("Stage 3b/3: upload_utl_to_sheets()")
+    utl_csv = base_dir / "data" / "output" / "utl_pipeline_output.csv"
+    if not utl_csv.exists():
+        print(f"Warning: UTL upload skipped; file not found: {utl_csv}")
+        return None
+
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv()
+    except ModuleNotFoundError:
+        # Optional; env vars may already be present from the shell.
+        pass
+
+    utl_tab_name = os.getenv("GOOGLE_SHEET_UTL_TAB", "").strip()
+    if not utl_tab_name:
+        print("Warning: UTL upload skipped; GOOGLE_SHEET_UTL_TAB is not set.")
+        return None
+
+    args = SimpleNamespace(
+        csv_path=str(utl_csv),
+        sheet_url=None,
+        tab_name=utl_tab_name,
+    )
+    csv_path, sheet_url, tab_name, service_account_path = sheets_upload.load_config(args)
+    sheet_name, row_count = sheets_upload.upload_csv_to_sheet(
+        csv_path=csv_path,
+        sheet_url=sheet_url,
+        tab_name=tab_name,
+        service_account_path=service_account_path,
+    )
+    print(
+        "Successfully updated UTL tab: "
+        f"{sheet_name} / {tab_name} - {row_count} rows uploaded."
+    )
+    return sheet_name, row_count
+
+
+def process_utl_data() -> Path:
+    print("Stage UTL: process_utl_data()")
+    exit_code = utl_processing.main()
+    if exit_code != 0:
+        raise ValueError("UTL processing failed")
+    output_csv = Path(__file__).resolve().parent / "data" / "output" / "utl_pipeline_output.csv"
+    if not output_csv.exists():
+        raise ValueError(f"Expected UTL output file not found: {output_csv}")
+    print(f"UTL process complete: {output_csv}")
+    return output_csv
+
+
 def main() -> int:
     args = parse_args()
     base_dir = Path(__file__).resolve().parent
     try:
+        if args.utl_only:
+            if not args.upload_utl:
+                print("Warning: --utl-only requires --upload-utl. Enabling UTL upload.")
+            if args.process_utl:
+                process_utl_data()
+            upload_utl_to_sheets(base_dir)
+            print("UTL-only upload completed.")
+            return 0
+
         ingest_files(base_dir)
         if args.stage_only:
             return 0
@@ -81,6 +168,13 @@ def main() -> int:
             return 0
 
         upload_to_sheets(output_csv)
+        if args.process_utl:
+            process_utl_data()
+        if args.upload_utl:
+            try:
+                upload_utl_to_sheets(base_dir)
+            except Exception as exc:
+                print(f"Warning: UTL upload failed: {exc}")
         print(
             "Pipeline completed. Verify Looker Studio reflects new rows after refresh."
         )

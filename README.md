@@ -23,7 +23,7 @@ After downloading, run the pipeline within 10 minutes so auto-detection can find
 
 ## UTL Report Preparation
 
-Before running the UTL processing script, prepare and export the UTL source reports:
+Before running UTL processing, prepare and export the UTL source reports:
 
 1. Open the historical utilisation report.
 2. Set date range to previous month.
@@ -31,11 +31,21 @@ Before running the UTL processing script, prepare and export the UTL source repo
 4. Set region to `United Kingdom`.
 5. Export data with utilisation by resources.
 6. Export rolled up time type report.
-7. Run the script:
+7. Put exported CSV files in `data/input`.
+8. Run the script:
 
 ```bash
 python process_utl_pipeline.py
 ```
+
+UTL input rules:
+- UTL processing reads only from `data/input` (never from `Downloads`).
+- Raw export filenames are allowed; matching files are auto-normalized to:
+  - `data/input/utl_by_capability.csv`
+  - `data/input/time_type.csv`
+- The newest matching file for each schema is selected.
+- Processing fails fast if either required source is missing or has invalid schema.
+- Output is written to `data/output/utl_pipeline_output.csv`.
 
 ## Setup
 
@@ -98,23 +108,27 @@ Run ingest + processing, skip Google upload:
 python main.py --skip-upload
 ```
 
-Run full workflow and also upload UTL output (`data/utl_pipeline_output.csv`) to the
+Run full workflow and also upload UTL output (`data/output/utl_pipeline_output.csv`) to the
 tab configured in `GOOGLE_SHEET_UTL_TAB`:
 
 ```bash
 python main.py --upload-utl
 ```
 
-Upload only UTL output (no ingest, no forecast processing/upload):
+Process UTL from `data/input` and upload only UTL output (no forecast ingest/process/upload):
 
 ```bash
-python main.py --upload-utl --utl-only
+python main.py --process-utl --upload-utl --utl-only
 ```
 
 Notes for `--upload-utl`:
-- If `data/utl_pipeline_output.csv` is missing, UTL upload is skipped with a warning.
+- If `data/output/utl_pipeline_output.csv` is missing, UTL upload is skipped with a warning.
 - If `GOOGLE_SHEET_UTL_TAB` is unset, UTL upload is skipped with a warning.
 - If UTL upload fails after forecast upload succeeds, the run warns and still completes.
+
+Notes for `--process-utl`:
+- Runs UTL normalization + processing from `data/input`.
+- Can be combined with `--upload-utl` in both normal and `--utl-only` modes.
 
 ## Google upload only
 

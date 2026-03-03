@@ -1,9 +1,7 @@
-import os
 import shutil
 from pathlib import Path
 import pandas as pd
 
-RECENT_FILE_WINDOW_DAYS = 30
 UTL_IDENTIFIER_HEADERS = {"PracticeName02", "Sum of ValueUtilizationTargetHours"}
 UTL_BASE_REQUIRED_HEADERS = UTL_IDENTIFIER_HEADERS | {
     "ResourceName",
@@ -19,10 +17,16 @@ FORECAST_FILE = "looker_studio_pipeline_forecast_v3.csv"
 FORECAST_REQUIRED_COLUMNS = {
     "Pricing Region: Region Name",
     "Capability",
+    "Stage",
     "Reporting Month (Date)",
     "Monthly Allocated Hours",
 }
 UK_REGION_NAME = "United Kingdom"
+INPUT_DIR = Path("data/input")
+OUTPUT_DIR = Path("data/output")
+CANONICAL_UTL = INPUT_DIR / "utl_by_capability.csv"
+CANONICAL_TIME = INPUT_DIR / "time_type.csv"
+OUTPUT_FILE = OUTPUT_DIR / "utl_pipeline_output.csv"
 PRACTICE_TO_PARENT = {
     "Media Strategy": "AI, Planning & Insights (H)",
     "Market Intelligence": "AI, Planning & Insights (H)",
@@ -78,20 +82,6 @@ PRACTICE_TO_PARENT = {
 }
 
 
-def get_downloads_path():
-    """Returns the default downloads path for Windows or Linux/Mac"""
-    if os.name == 'nt':
-        return Path(os.environ['USERPROFILE']) / 'Downloads'
-    else:
-        return Path.home() / 'Downloads'
-
-
-def _is_recent(path: Path, max_age_days: int = RECENT_FILE_WINDOW_DAYS) -> bool:
-    modified_time = path.stat().st_mtime
-    age_seconds = max(0.0, pd.Timestamp.now().timestamp() - modified_time)
-    return age_seconds <= (max_age_days * 24 * 60 * 60)
-
-
 def _normalised_headers(path: Path):
     return [str(col).strip() for col in pd.read_csv(path, nrows=0).columns]
 
@@ -116,68 +106,57 @@ def _select_existing_column(columns, candidate_columns, label):
 
 
 def stage_files():
-    downloads_dir = get_downloads_path()
-    data_dir = Path("data")
-    data_dir.mkdir(exist_ok=True)
-    
-    utl_dest = data_dir / "utl_by_capability.csv"
-    time_dest = data_dir / "time_type.csv"
-    
-    utl_found = False
-    time_found = False
-    
-    # Get recent CSVs in downloads, sorted by modification time (newest first)
-    try:
-        csv_files = sorted(
-            [p for p in downloads_dir.glob("*.csv") if _is_recent(p)],
-            key=os.path.getmtime,
-            reverse=True,
-        )
-    except FileNotFoundError:
-        csv_files = []
-        
+    INPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    csv_files = sorted(
+        INPUT_DIR.glob("*.csv"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+
+    selected_utl: Path | None = None
+    selected_time: Path | None = None
+
     for filepath in csv_files:
-        if utl_found and time_found:
-            break
-            
         try:
-            # Read only headers and identify by required schema
             headers = _normalised_headers(filepath)
-            
-            if (
-                not utl_found
-                and _has_headers(headers, UTL_BASE_REQUIRED_HEADERS)
-                and _contains_any_header(headers, UTL_BILLABLE_COLUMN_CANDIDATES)
-            ):
-                print(f"Found Utl Data: {filepath.name}")
-                if utl_dest.exists(): utl_dest.unlink()
-                shutil.move(str(filepath), str(utl_dest))
-                print(f"Moved to: {utl_dest}")
-                utl_found = True
-                continue
-                
-            if not time_found and _has_headers(headers, TIME_REQUIRED_HEADERS):
-                print(f"Found Time Data: {filepath.name}")
-                if time_dest.exists(): time_dest.unlink()
-                shutil.move(str(filepath), str(time_dest))
-                print(f"Moved to: {time_dest}")
-                time_found = True
-                continue
-                
         except Exception as e:
             print(f"Warning skipping {filepath.name}: {repr(e)}")
             continue
-            
-    if not utl_found:
-        if utl_dest.exists():
-            print("Utl Data not found in recent Downloads. Using existing data/utl_by_capability.csv.")
-        else:
-            print("Utl Data not found in recent Downloads and no fallback file found in data/.")
-    if not time_found:
-        if time_dest.exists():
-            print("Time Data not found in recent Downloads. Using existing data/time_type.csv.")
-        else:
-            print("Time Data not found in recent Downloads and no fallback file found in data/.")
+
+        is_utl = _has_headers(headers, UTL_BASE_REQUIRED_HEADERS) and _contains_any_header(
+            headers, UTL_BILLABLE_COLUMN_CANDIDATES
+        )
+        is_time = _has_headers(headers, TIME_REQUIRED_HEADERS)
+
+        if selected_utl is None and is_utl:
+            selected_utl = filepath
+            print(f"Selected UTL source: {filepath.name}")
+
+        if selected_time is None and is_time:
+            selected_time = filepath
+            print(f"Selected Time source: {filepath.name}")
+
+        if selected_utl is not None and selected_time is not None:
+            break
+
+    if selected_utl is None:
+        raise ValueError(
+            f"Missing required UTL source in {INPUT_DIR}. "
+            "Add a CSV containing the expected UTL columns."
+        )
+    if selected_time is None:
+        raise ValueError(
+            f"Missing required Time source in {INPUT_DIR}. "
+            "Add a CSV containing the expected Time Type columns."
+        )
+
+    if selected_utl.resolve() != CANONICAL_UTL.resolve():
+        shutil.copy2(selected_utl, CANONICAL_UTL)
+    if selected_time.resolve() != CANONICAL_TIME.resolve():
+        shutil.copy2(selected_time, CANONICAL_TIME)
+    print(f"Canonical UTL file updated: {CANONICAL_UTL}")
+    print(f"Canonical Time file updated: {CANONICAL_TIME}")
 
 
 def _ensure_required_columns(df: pd.DataFrame, required_columns, label: str):
@@ -204,10 +183,12 @@ def _next_n_full_month_starts(today: pd.Timestamp, n: int = 3) -> list[pd.Timest
     return [current_month_start + pd.DateOffset(months=offset) for offset in range(1, n + 1)]
 	
 def process_data():
-    utl_path = Path("data/utl_by_capability.csv")
-    time_path = Path("data/time_type.csv")
+    utl_path = CANONICAL_UTL
+    time_path = CANONICAL_TIME
     forecast_path = Path(FORECAST_FILE)
-    output_path = Path("data/utl_pipeline_output.csv")
+    output_path = OUTPUT_FILE
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     
     if not utl_path.exists() or not time_path.exists() or not forecast_path.exists():
         print(
@@ -271,10 +252,13 @@ def process_data():
         time_grouped = df_time_filtered.groupby("ResourcePracticeName02").agg({
             "Sum of ValueTotalHours": "sum"
         }).reset_index()
-        time_grouped.rename(columns={
-            "ResourcePracticeName02": "PracticeName02", 
-            "Sum of ValueTotalHours": "Sum of New Business Hours"
-        }, inplace=True)
+        time_grouped.rename(
+            columns={
+                "ResourcePracticeName02": "PracticeName02",
+                "Sum of ValueTotalHours": "Sum of New Business Hours",
+            },
+            inplace=True,
+        )
     else:
         # Create an empty dataframe with expected columns if no data matches
         time_grouped = pd.DataFrame(columns=["PracticeName02", "Sum of New Business Hours"])
@@ -285,6 +269,7 @@ def process_data():
         df_forecast["Pricing Region: Region Name"].astype(str).str.strip()
     )
     df_forecast["Capability"] = df_forecast["Capability"].astype(str).str.strip()
+    df_forecast["Stage"] = df_forecast["Stage"].astype(str).str.strip()
     df_forecast["Reporting Month (Date)"] = pd.to_datetime(
         df_forecast["Reporting Month (Date)"], errors="coerce"
     )
@@ -296,6 +281,7 @@ def process_data():
     forecast_months = df_forecast["Reporting Month (Date)"].dt.to_period("M").dt.to_timestamp()
     forecast_filtered = df_forecast[
         (df_forecast["Pricing Region: Region Name"] == UK_REGION_NAME)
+        & (df_forecast["Stage"].str.casefold() == "closed won")
         & forecast_months.isin(month_start_set)
     ]
     if not forecast_filtered.empty:
@@ -373,14 +359,25 @@ def process_data():
     output_df["Total Calendar hours"] = merged_df["CalendarHours"]
     output_df["Current Utl %"] = current_utl_pct_points.astype(str) + "%"
     output_df["Pipeline %"] = pipeline_pct_points.astype(str) + "%"
+    output_df["Pipeline hours"] = merged_df["PipelineAvgHours"].round(0).astype(int)
     output_df["Est. Ult"] = est_ult_pct_points.astype(str) + "%"
     
     print(f"Saving output to {output_path}...")
     output_df.to_csv(output_path, index=False)
     print("Done!")
 
+
+def main() -> int:
+    try:
+        print("--- Step 1: Normalising input files ---")
+        stage_files()
+        print("\n--- Step 2: Processing Data ---")
+        process_data()
+        return 0
+    except Exception as exc:
+        print(f"Error: {exc}")
+        return 1
+
+
 if __name__ == "__main__":
-    print("--- Step 1: Staging Files ---")
-    stage_files()
-    print("\n--- Step 2: Processing Data ---")
-    process_data()
+    raise SystemExit(main())

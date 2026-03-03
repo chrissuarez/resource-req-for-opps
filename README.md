@@ -1,8 +1,34 @@
 # Resourcing Requirements for Pipeline
 
+## Quick Commands
+
+Full forecast workflow (stage from `data/input`, process, upload):
+
+```bash
+python main.py
+```
+
+Full forecast workflow + UTL upload:
+
+```bash
+python main.py --process-utl --upload-utl
+```
+
+UTL-only refresh + upload:
+
+```bash
+python main.py --process-utl --upload-utl --utl-only
+```
+
+Upload-only (already generated UTL output):
+
+```bash
+python main.py --upload-utl --utl-only
+```
+
 This project automates a full workflow:
 
-1. Detect the latest Salesforce exports in `Downloads`
+1. Read Salesforce exports from `data/input`
 2. Stage them into `data/` as:
    - `data/pipeline.csv`
    - `data/resourcing.csv`
@@ -19,7 +45,18 @@ Download these two reports from Salesforce:
 - Resourcing report:  
   `https://jellyfish.lightning.force.com/lightning/r/Report/00ORN000009Sj8H2AS/view`
 
-After downloading, run the pipeline within 10 minutes so auto-detection can find the files in `Downloads`.
+Place exported forecast CSVs in `data/input` before running `python main.py`.
+
+Forecast input rules:
+- Forecast processing reads only from `data/input` (never from `Downloads`).
+- Raw export filenames are allowed.
+- The newest matching file for each schema is selected:
+  - Pipeline source: must include column `Opportunity Owner`
+  - Resourcing source: must include column `Resource Role`
+- Selected files are copied to:
+  - `data/pipeline.csv`
+  - `data/resourcing.csv`
+- Processing fails fast if either required source is missing.
 
 ## UTL Report Preparation
 
@@ -90,7 +127,7 @@ python main.py
 
 This will:
 
-1. Stage recent CSVs from `Downloads`
+1. Stage CSVs from `data/input`
 2. Process forecast data
 3. Upload results to Google Sheets
 
@@ -112,7 +149,7 @@ Run full workflow and also upload UTL output (`data/output/utl_pipeline_output.c
 tab configured in `GOOGLE_SHEET_UTL_TAB`:
 
 ```bash
-python main.py --upload-utl
+python main.py --process-utl --upload-utl
 ```
 
 Process UTL from `data/input` and upload only UTL output (no forecast ingest/process/upload):
@@ -154,8 +191,10 @@ python upload_to_google_sheets.py --csv-path looker_studio_pipeline_forecast_v3.
 
 ## Troubleshooting
 
-- `Missing recent Salesforce export(s)`:
-  - Re-download both reports and rerun within 10 minutes.
+- `Missing Salesforce input file(s)`:
+  - Ensure both forecast exports are in `data/input` and include required columns:
+    - Pipeline: `Opportunity Owner`
+    - Resourcing: `Resource Role`
 - `Missing Google Sheet URL`:
   - Confirm `.env` exists and contains `GOOGLE_SHEET_URL`.
 - `403 The caller does not have permission`:

@@ -17,7 +17,7 @@ import upload_to_google_sheets as sheets_upload
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Run the full pipeline: stage recent Salesforce exports, process forecast, "
+            "Run the full pipeline: stage Salesforce exports from data/input, process forecast, "
             "and upload to Google Sheets."
         )
     )

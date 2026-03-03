@@ -8,16 +8,15 @@ from pathlib import Path
 import re
 import shutil
 import sys
-import time
 
 import pandas as pd
 
 
 DATA_DIR = "data"
+INPUT_DIR = "input"
 PIPELINE_FILE = "pipeline.csv"
 RESOURCING_FILE = "resourcing.csv"
 FORECAST_OUTPUT_FILE = "looker_studio_pipeline_forecast_v3.csv"
-RECENT_WINDOW_SECONDS = 10 * 60
 PRICING_REGION_COLUMN = "Pricing Region: Region Name"
 
 PIPELINE_COLUMN_MAP = {
@@ -134,39 +133,36 @@ def _read_csv_header_columns(path: Path) -> set[str]:
     raise ValueError(f"Could not read header from CSV file: {path}") from last_error
 
 
-def _find_recent_csv_files(downloads_dir: Path, seconds: int) -> list[Path]:
-    now = time.time()
-    recent_files = []
-    for file_path in downloads_dir.iterdir():
-        if not file_path.is_file() or file_path.suffix.lower() != ".csv":
-            continue
-        file_age_seconds = now - file_path.stat().st_mtime
-        if file_age_seconds <= seconds:
-            recent_files.append(file_path)
-    return sorted(recent_files, key=lambda path: path.stat().st_mtime, reverse=True)
+def _find_csv_files(input_dir: Path) -> list[Path]:
+    return sorted(
+        [file_path for file_path in input_dir.glob("*.csv") if file_path.is_file()],
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
 
 
 def _atomic_move(source: Path, destination: Path) -> None:
     temp_destination = destination.with_name(destination.name + ".tmp")
     if temp_destination.exists():
         temp_destination.unlink()
-    shutil.move(str(source), str(temp_destination))
+    shutil.copy2(str(source), str(temp_destination))
     temp_destination.replace(destination)
 
 
-def stage_recent_salesforce_exports(
-    downloads_dir: Path, data_dir: Path, recent_seconds: int = RECENT_WINDOW_SECONDS
+def stage_salesforce_exports_from_input(
+    input_dir: Path, data_dir: Path
 ) -> tuple[Path, Path]:
+    input_dir.mkdir(parents=True, exist_ok=True)
     data_dir.mkdir(parents=True, exist_ok=True)
     pipeline_destination = data_dir / PIPELINE_FILE
     resourcing_destination = data_dir / RESOURCING_FILE
 
-    recent_csvs = _find_recent_csv_files(downloads_dir, recent_seconds)
+    input_csvs = _find_csv_files(input_dir)
 
     pipeline_candidates: list[Path] = []
     resourcing_candidates: list[Path] = []
 
-    for csv_path in recent_csvs:
+    for csv_path in input_csvs:
         try:
             columns = _read_csv_header_columns(csv_path)
         except ValueError:
@@ -191,24 +187,21 @@ def stage_recent_salesforce_exports(
     if not resourcing_candidates:
         missing.append("Resourcing CSV (requires column 'Resource Role')")
     if missing:
-        if not recent_csvs:
+        if not input_csvs:
             raise ValueError(
-                "Missing recent Salesforce export(s): "
+                "Missing Salesforce input file(s): "
                 + ", ".join(missing)
-                + f". No CSV files were modified in {downloads_dir} within the last "
-                f"{recent_seconds // 60} minutes."
+                + f". No CSV files found in {input_dir}."
             )
-        raise ValueError("Missing recent Salesforce export(s): " + ", ".join(missing))
+        raise ValueError("Missing Salesforce input file(s): " + ", ".join(missing))
 
     selected_pipeline = pipeline_candidates[0]
     selected_resourcing = resourcing_candidates[0]
 
-    print(
-        f"Found Pipeline file: {selected_pipeline.name} -> Moving to data/pipeline.csv"
-    )
+    print(f"Found Pipeline file: {selected_pipeline.name} -> Copying to data/pipeline.csv")
     print(
         "Found Resourcing file: "
-        f"{selected_resourcing.name} -> Moving to data/resourcing.csv"
+        f"{selected_resourcing.name} -> Copying to data/resourcing.csv"
     )
 
     _atomic_move(selected_pipeline, pipeline_destination)
@@ -221,20 +214,12 @@ def stage_recent_salesforce_exports(
     return pipeline_destination, resourcing_destination
 
 
-def ingest_files(
-    base_dir: Path | None = None, recent_seconds: int = RECENT_WINDOW_SECONDS
-) -> tuple[Path, Path]:
+def ingest_files(base_dir: Path | None = None) -> tuple[Path, Path]:
     if base_dir is None:
         base_dir = Path(__file__).resolve().parent
-    downloads_dir = resolve_downloads_dir(base_dir)
-    if downloads_dir is None:
-        raise ValueError("Downloads directory not found in known locations")
     data_dir = base_dir / DATA_DIR
-    return stage_recent_salesforce_exports(
-        downloads_dir=downloads_dir,
-        data_dir=data_dir,
-        recent_seconds=recent_seconds,
-    )
+    input_dir = data_dir / INPUT_DIR
+    return stage_salesforce_exports_from_input(input_dir=input_dir, data_dir=data_dir)
 
 
 def parse_args() -> argparse.Namespace:
@@ -242,8 +227,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--stage",
         action="store_true",
-        help="Detect recent Salesforce exports in Downloads and stage them into data/ "
-        "before processing.",
+        help="Stage Salesforce exports from data/input into data/ before processing.",
     )
     parser.add_argument(
         "--stage-only",
@@ -251,20 +235,6 @@ def parse_args() -> argparse.Namespace:
         help="Run staging only, then exit.",
     )
     return parser.parse_args()
-
-
-def resolve_downloads_dir(base_dir: Path) -> Path | None:
-    candidates = [Path.home() / "Downloads"]
-
-    parts = base_dir.resolve().parts
-    if len(parts) >= 5 and parts[1:4] == ("mnt", "c", "Users"):
-        windows_user = parts[4]
-        candidates.append(Path("/mnt/c/Users") / windows_user / "Downloads")
-
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    return None
 
 
 def _parse_required_date(value: object, field_name: str) -> date:
@@ -406,26 +376,24 @@ def explode_to_monthly_rows(row: dict | pd.Series) -> list[dict]:
 def main(stage_files: bool = False, stage_only: bool = False) -> int:
     base_dir = Path(__file__).resolve().parent
     data_dir = base_dir / DATA_DIR
-    downloads_dir = resolve_downloads_dir(base_dir)
+    input_dir = data_dir / INPUT_DIR
     pipeline_path = data_dir / PIPELINE_FILE
     resourcing_path = data_dir / RESOURCING_FILE
     forecast_output_path = base_dir / FORECAST_OUTPUT_FILE
 
     try:
         if stage_files or stage_only:
-            if downloads_dir is None:
-                raise ValueError("Downloads directory not found in known locations")
-            stage_recent_salesforce_exports(downloads_dir, data_dir)
+            stage_salesforce_exports_from_input(input_dir, data_dir)
             if stage_only:
                 return 0
 
         if not pipeline_path.exists():
             raise ValueError(
-                f"file not found: {pipeline_path} (run with --stage to auto-stage from Downloads)"
+                f"file not found: {pipeline_path} (run with --stage to stage from data/input)"
             )
         if not resourcing_path.exists():
             raise ValueError(
-                f"file not found: {resourcing_path} (run with --stage to auto-stage from Downloads)"
+                f"file not found: {resourcing_path} (run with --stage to stage from data/input)"
             )
 
         pipeline_df = read_csv_with_fallback(pipeline_path)
